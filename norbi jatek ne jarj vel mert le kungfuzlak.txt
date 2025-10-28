@@ -1,0 +1,252 @@
+<!doctype html>
+
+<html lang="hu">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>5 Stars — The Arcade Shadow (Mini Horror Game)</title>
+  <style>
+    :root{--bg:#0b0b0f;--ui:#e6e6e6;--danger:#ff4d4d}
+    html,body{height:100%;margin:0;background:linear-gradient(180deg,#05050a 0%, #111018 100%);color:var(--ui);font-family:Inter,Segoe UI,Roboto,Arial}
+    .wrap{display:flex;gap:20px;align-items:flex-start;padding:24px}
+    canvas{background:#0f0f14;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,0.7)}
+    .panel{max-width:360px}
+    h1{margin:0 0 12px;font-size:20px}
+    p{margin:6px 0}
+    .controls{background:rgba(255,255,255,0.03);padding:12px;border-radius:8px}
+    button{margin-top:12px;padding:8px 12px;border-radius:8px;border:0;background:#1b1b24;color:var(--ui);cursor:pointer}
+    footer{margin-top:10px;font-size:12px;color:#9a9aa0}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="game" width="768" height="512"></canvas>
+    <div class="panel">
+      <h1>5 Stars — The Arcade Shadow</h1>
+      <p><strong>Story:</strong> Egy elhagyatott játékgép-teremben rekedtél. A falak mögül egy árnyék vadászik rád — kapd össze az 5 csillagot, és nyisd ki a kijáratot, mielőtt az árnyék elkap.</p>
+      <div class="controls">
+        <p><strong>Irányítás:</strong></p>
+        <p>W / A / S / D vagy nyilak — mozgás</p>
+        <p>Space — villanás (lefagyasztja az árnyékot rövid ideig)</p>
+        <p>Objective: Gyűjtsd össze az 5 csillagot és szabadulj ki. Az árnyék a közeled alapján követ, de néha megidézett hullámok lassítják.</p>
+      </div>
+      <button id="restart">Új játék</button>
+      <footer>
+        <p>Ez egy egyszerű, egylapos HTML/JS játék — könnyen feltölthető GitHub Pages-re. Szeretnél GitHub push parancsokat is?</p>
+      </footer>
+    </div>
+  </div>  <script>
+  // Egyszerű 2D horror mini-game (single file)
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  // Játékállapot
+  let keys = {};
+  let gameState = 'menu'; // menu, playing, win, lose
+  let player, shadow, stars, timeLeft, flashCooldown;
+
+  function rand(min,max){return Math.random()*(max-min)+min}
+  function dist(a,b){const dx=a.x-b.x, dy=a.y-b.y; return Math.sqrt(dx*dx+dy*dy)}
+
+  function init(){
+    player = {x:W/4,y:H/2,r:12,speed:2.4,flash:0};
+    shadow = {x:W*0.85,y:H/2,r:22,baseSpeed:1.0};
+    stars = [];
+    for(let i=0;i<5;i++) stars.push({x:rand(80,W-80), y:rand(80,H-80), r:9, taken:false, bob: rand(0,Math.PI*2)});
+    timeLeft = 90; // seconds
+    flashCooldown = 0;
+    gameState = 'playing';
+    lastTick = performance.now();
+  }
+
+  // Input
+  window.addEventListener('keydown', e=>{keys[e.key.toLowerCase()]=true; if(e.key===' ') e.preventDefault();});
+  window.addEventListener('keyup', e=>{keys[e.key.toLowerCase()]=false});
+  document.getElementById('restart').addEventListener('click', ()=>init());
+
+  // Simple ambient noise using WebAudio (generated)
+  const AudioCtx = window.AudioContext||window.webkitAudioContext;
+  let audioCtx;
+  function playAmbience(){
+    if(!AudioCtx) return;
+    if(!audioCtx) audioCtx = new AudioCtx();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type='sine'; o.frequency.value = 40 + Math.random()*60; g.gain.value = 0.0015;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime+0.28);
+  }
+
+  // Game loop
+  let lastTick = performance.now();
+  function update(){
+    const now = performance.now();
+    const dt = Math.min(60, now - lastTick)/1000;
+    lastTick = now;
+
+    if(gameState==='playing'){
+      // timer
+      timeLeft -= dt;
+      if(timeLeft<=0){ gameState='lose'; }
+
+      // player move
+      let vx=0, vy=0;
+      if(keys['w']||keys['arrowup']) vy-=1;
+      if(keys['s']||keys['arrowdown']) vy+=1;
+      if(keys['a']||keys['arrowleft']) vx-=1;
+      if(keys['d']||keys['arrowright']) vx+=1;
+      const mag = Math.hypot(vx,vy) || 1;
+      player.x += vx/mag * player.speed * (1 + 0.02*Math.sin(now/120));
+      player.y += vy/mag * player.speed * (1 + 0.02*Math.sin(now/120));
+      player.x = Math.max(16, Math.min(W-16, player.x));
+      player.y = Math.max(16, Math.min(H-16, player.y));
+
+      // flash (space)
+      if((keys[' ']||keys['space']) && flashCooldown<=0){
+        flashCooldown = 3.0; // cooldown seconds
+        player.flash = 0.9; // duration
+        playAmbience();
+      }
+      if(flashCooldown>0) flashCooldown -= dt;
+      if(player.flash>0) player.flash -= dt;
+
+      // Shadow AI: moves toward player, but speed increases if far, slows if close; frozen by flash
+      let shadowSpeed = shadow.baseSpeed + dist(shadow, player)/360;
+      if(player.flash>0){ shadowSpeed *= 0.08; }
+      // small random jitters for spookiness
+      const angleToPlayer = Math.atan2(player.y-shadow.y, player.x-shadow.x);
+      shadow.x += Math.cos(angleToPlayer) * shadowSpeed * (1 + 0.2*Math.sin(now/300));
+      shadow.y += Math.sin(angleToPlayer) * shadowSpeed * (1 + 0.2*Math.cos(now/300));
+
+      // collect stars
+      for(let s of stars){
+        s.bob += dt*6;
+        if(!s.taken && dist(s, player) < player.r + s.r){ s.taken = true; }
+      }
+
+      // win check
+      if(stars.every(s=>s.taken)){
+        gameState = 'win';
+      }
+
+      // lose if shadow touches player
+      if(dist(player, shadow) < player.r + shadow.r - 6){ gameState='lose'; }
+    }
+
+    draw();
+    if(gameState!=='menu') requestAnimationFrame(update);
+  }
+
+  function draw(){
+    // background
+    ctx.clearRect(0,0,W,H);
+    // subtle scanlines
+    ctx.fillStyle = '#06060a';
+    ctx.fillRect(0,0,W,H);
+
+    // vignette
+    const grad = ctx.createRadialGradient(W/2,H/2,10,W/2,H/2,Math.max(W,H));
+    grad.addColorStop(0,'rgba(30,30,40,0.05)');
+    grad.addColorStop(1,'rgba(0,0,0,0.6)');
+    ctx.fillStyle = grad; ctx.fillRect(0,0,W,H);
+
+    // draw stars (collectibles)
+    for(let s of stars){
+      if(s.taken) continue;
+      const bobY = Math.sin(s.bob)*6;
+      // glow
+      ctx.beginPath();
+      ctx.fillStyle = rgba(255,230,120,0.12);
+      ctx.arc(s.x, s.y + bobY, s.r*2.6, 0, Math.PI*2); ctx.fill();
+      // star shape
+      ctx.save(); ctx.translate(s.x, s.y + bobY);
+      ctx.rotate((performance.now()/1000 + s.bob)/3);
+      drawStar(0,0,s.r,5);
+      ctx.restore();
+    }
+
+    // player
+    // pulsing aura
+    const aura = 1 + 0.15*Math.sin(performance.now()/150);
+    ctx.beginPath(); ctx.fillStyle = rgba(100,160,255,${0.12 + 0.02* Math.sin(performance.now()/120)});
+    ctx.arc(player.x, player.y, player.r * aura * (1 + player.flash*0.8), 0, Math.PI*2); ctx.fill();
+    // body
+    ctx.beginPath(); ctx.fillStyle = '#cfe9ff'; ctx.arc(player.x, player.y, player.r,0,Math.PI*2); ctx.fill();
+    // eyes
+    ctx.beginPath(); ctx.fillStyle = '#1b1b24'; ctx.arc(player.x-4,player.y-2,2,0,Math.PI*2); ctx.arc(player.x+4,player.y-2,2,0,Math.PI*2); ctx.fill();
+
+    // shadow (enemy)
+    const sdist = dist(shadow, player);
+    const pulse = 0.9 + 0.15*Math.sin(performance.now()/130);
+    // shadow body
+    const shadowGrad = ctx.createRadialGradient(shadow.x, shadow.y, 2, shadow.x, shadow.y, shadow.r*2);
+    shadowGrad.addColorStop(0, rgba(10,10,12,0.15));
+    shadowGrad.addColorStop(1, rgba(0,0,0,0.9));
+    ctx.beginPath(); ctx.fillStyle = shadowGrad; ctx.arc(shadow.x, shadow.y, shadow.r * pulse * (1 + Math.min(0.5, sdist/300)), 0, Math.PI*2); ctx.fill();
+    // tendrils
+    for(let i=0;i<8;i++){
+      const a = performance.now()/400 + i*0.78;
+      ctx.beginPath(); ctx.moveTo(shadow.x,shadow.y);
+      ctx.quadraticCurveTo(shadow.x + Math.cos(a)*80, shadow.y + Math.sin(a)*80, shadow.x + Math.cos(a*1.7)*140, shadow.y + Math.sin(a*1.7)*140);
+      ctx.strokeStyle = rgba(0,0,0,${0.05 + 0.02*Math.abs(Math.sin(a))});
+      ctx.lineWidth = 3; ctx.stroke();
+    }
+
+    // UI: timer and collected
+    ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.font = '18px monospace';
+    ctx.fillText(Idő: ${Math.max(0, Math.floor(timeLeft))}s, 18, 28);
+    const taken = stars.filter(s=>s.taken).length;
+    ctx.fillText(Csillagok: ${taken}/5, 18, 52);
+
+    if(gameState==='win'){
+      drawOverlay('Kijutottál — nyertél!', 'Gratulálok, megszerezted az 5 csillagot és elszabadultál az árnyék elől.');
+    } else if(gameState==='lose'){
+      drawOverlay('Elkapott az árnyék...', 'Visszatérsz a tábla elejére, ha újra próbálod.');
+    }
+  }
+
+  function drawStar(x,y,r, spikes=5){
+    ctx.beginPath();
+    for(let i=0;i<spikes*2;i++){
+      const a = i * Math.PI/(spikes);
+      const rad = (i%2===0)? r*1.0 : r*0.45;
+      const xx = Math.cos(a)*rad, yy = Math.sin(a)*rad;
+      if(i===0) ctx.moveTo(xx,yy); else ctx.lineTo(xx,yy);
+    }
+    ctx.closePath(); ctx.fillStyle = 'rgba(255,230,120,0.95)'; ctx.fill();
+  }
+
+  function drawOverlay(title, text){
+    ctx.fillStyle = 'rgba(2,2,2,0.6)'; ctx.fillRect(60, H/2 - 90, W-120, 160);
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.strokeRect(60, H/2 - 90, W-120, 160);
+    ctx.fillStyle = '#fff'; ctx.font='34px serif'; ctx.fillText(title, 120, H/2 - 30);
+    ctx.font='18px monospace'; ctx.fillText(text, 120, H/2 + 6);
+    ctx.font='14px monospace'; ctx.fillText('Nyomd az Új játék gombot vagy F5-t az újrakezdéshez.', 120, H/2 + 46);
+  }
+
+  // Start game on user gesture (audio safety)
+  canvas.addEventListener('click', ()=>{
+    if(gameState==='menu') init();
+    if(audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    if(gameState==='playing') requestAnimationFrame(update);
+  });
+
+  // init menu
+  (function showMenu(){
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle='#05050a'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = '#fff'; ctx.font='bold 26px sans-serif'; ctx.fillText('5 Stars — The Arcade Shadow', 60, 120);
+    ctx.font='16px monospace'; ctx.fillText('Kattints a vászonra vagy nyomj egy gombot a játék indításához.', 60, 160);
+    ctx.fillText('Story: Egy elhagyott játékteremben ragadtál. Gyűjtsd össze az 5 csillagot, mielőtt az árnyék elkap.', 60, 200);
+  })();
+
+  // begin listening for first keypress to start
+  window.addEventListener('keydown', function firstStart(){
+    if(gameState==='menu'){ init(); requestAnimationFrame(update); window.removeEventListener('keydown', firstStart); }
+  });
+
+  // auto start small loop to keep animation alive
+  requestAnimationFrame(()=>{});
+  </script></body>
+</html>
